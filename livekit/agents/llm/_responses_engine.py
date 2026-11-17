@@ -481,7 +481,18 @@ class ResponsesLLMStream(llm.LLMStream):
         self._response_id = event.response.id
 
     def _handle_response_completed(self, event: ResponseCompletedEvent) -> llm.ChatChunk | None:
+        annotations: list[dict[str, Any]] = []
+        web_search_calls: list[dict[str, Any]] = []
         for item in event.response.output:
+            if isinstance(item, ResponseOutputMessage):
+                for part in item.content:
+                    if part.type == "output_text":
+                        annotations.extend(
+                            annotation.model_dump(exclude_none=True)
+                            for annotation in part.annotations
+                        )
+            elif item.type == "web_search_call":
+                web_search_calls.append(item.model_dump(exclude_none=True))
             # Every item.type is a discriminator of openai's ResponseOutputItem union.
             # Of those, only these are produced/consumed by the agent itself; all other
             # members of the union are tools the Responses API runs server-side (e.g.
@@ -544,6 +555,20 @@ class ResponsesLLMStream(llm.LLMStream):
                     total_tokens=usage.total_tokens,
                     service_tier=getattr(event.response, "service_tier", None),
                 ),
+            )
+        if annotations or web_search_calls:
+            # hosted search evidence arrives only on the completed response; surface it
+            # even when the response carries no usage
+            if chunk is None:
+                chunk = llm.ChatChunk(id=self._response_id)
+            chunk.delta = llm.ChoiceDelta(
+                role="assistant",
+                extra={
+                    "openai": {
+                        "annotations": annotations,
+                        "web_search_calls": web_search_calls,
+                    }
+                },
             )
         return chunk
 
